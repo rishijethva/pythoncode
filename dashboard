@@ -1,0 +1,1224 @@
+import pandas as pd
+import numpy as np
+from datetime import date
+import datetime as dt
+from functools import reduce
+from io import StringIO
+import boto3
+import sys
+
+
+today = date.today()
+current_date=today.strftime(r"%Y-%m-%d")
+file_date_add=today.strftime(r"%Y%m%d")
+yesterday=(date.today()-dt.timedelta(1)).strftime(r"%Y%m%d")
+first = today.replace(day=1)
+current_month=today.strftime("%Y%m")
+lastMonthwDays = first - dt.timedelta(days=1)
+lastMonth=lastMonthwDays.strftime("%Y%m")
+
+gfilename='Dashboard_Manual_New.xlsm'
+gsheetname='Data'
+gsheetname_d='Data_D'
+opec_sheet='OPEC Sheet'
+
+###### File Map ######
+
+
+input_path='Production/Crude/Source/'
+
+input_files={
+    'dashboard':'Dashboard/Dashboard.xlsm',
+    'key_events':'Key_Events/key_events.xlsx',
+    'iea_report':'Key_Agency_Forecast/IEA/IEA_report.xlsx',
+    'eia_report':'Key_Agency_Forecast/EIA/STEO_report.xlsx',
+    'opec_report':'Key_Agency_Forecast/OPEC/OPEC_report.xlsx',
+    'modelscore':'Model_Score/Model_Score.csv'
+}
+
+
+collection_path='Production/Crude/Collection/'
+
+collection_files={
+    'rig_count':'rigcount.csv',
+    'stocks':'stocks.csv',
+    'cftc':'cftc.csv',
+    'currency_correlation':'currency_correlation.csv',
+    'refinery_outage':'refinery_outage.csv',
+    'refinery_margins':'refinery_margins.csv',
+    'geopolitical_volatility':'geopolitical_volatility.csv',
+    'opec':'opec_prod.csv',
+    'other_assets':'other_assets.csv'
+}
+
+
+output_path='Production/Crude/Destination/'
+
+output_files={
+    'rig_count':'rigcount.csv',
+    'stocks':'stocks.csv',
+    'cftc':'cftc.csv',
+    'currency_correlation':'currency_correlation.csv',
+    'refinery_outage':'refinery_outage.csv',
+    'refinery_margins':'refinery_margins.csv',
+    'geopolitical_volatility':'geopolitical_volatility.csv',
+    'opec':'opec_prod.csv',
+    'key_agency_forecast':'key_agency_forecast.csv',
+    'other_assets':'other_assets.csv',
+    'technicals':'technicals.csv',
+    'key_events':'key_events.csv',
+    'crude_volatility':'crude_volatility.csv',
+    'modelscore':'model_score.csv'
+}
+
+for file in input_files:
+    input_files[file]=input_path+input_files[file].replace(input_files[file][input_files[file].find('.'):],'_'+file_date_add+input_files[file][input_files[file].find('.'):])
+
+
+for file in output_files:
+    output_files[file]=output_path+file+'/'+output_files[file].replace(output_files[file][output_files[file].find('.'):],'_'+file_date_add+output_files[file][output_files[file].find('.'):])
+
+
+for file in collection_files:
+    collection_files[file]=collection_path+file+'/'+collection_files[file].replace(collection_files[file][collection_files[file].find('.'):],'_'+file_date_add+collection_files[file][collection_files[file].find('.'):])
+
+
+
+
+###### s3 connection ######
+
+
+s3_resource = boto3.resource('s3')
+bucket='ssoe-analysis-dashboard'
+bucket_obj = s3_resource.Bucket(bucket)
+
+
+
+def find_previous(name,limit=100):
+    count=0
+    oname=name
+    while count<limit:
+        l=name.split('_')[-1].split('.')[0]
+        time=pd.to_datetime(l,format='%Y%m%d')
+        newtime=time-dt.timedelta(1)
+        l=newtime.strftime('%Y%m%d')
+        last_file='_'.join(name.split('_')[0:-1])+'_'+l+name[name.find('.'):]
+        count+=1
+        try:
+            s3.Object(bucket,name).load()
+            return last_file
+        except:
+            name=last_file
+            print('Checking for file '+name)
+    print(oname+' was not found for ',limit,' days')
+    return None
+
+
+def start_glue(crawler):
+    glue=boto3.client('glue')
+    try:
+        glue.start_crawler(Name=crawler)
+        print(crawler+' started')
+    except Exception as e:
+        print(e)
+        print('Error starting crawler')
+
+
+def fetchexcel(path):
+    try:
+        obj = s3_resource.Object(bucket_name=bucket, key=path)
+        response = obj.get()
+        data = response['Body'].read()
+        return data
+    except:
+        return None
+    
+def pushfile(df,path):
+    csv_buffer = StringIO()
+    df.to_csv(csv_buffer,index=False)
+    s3_resource.Object(bucket,path).put(Body=csv_buffer.getvalue())
+
+
+
+####### Data Map #######
+
+
+
+stocks_names_proper={
+    'Genscape ARA Crude Total Tank':'Crude',
+    'PJK International ARA Gas Oil':'Gas Oil',
+    'PJK International ARA Gasoline':'Gasoline',
+    'PJK International ARA Fuel Oil':'Fuel Oil',
+    'PJK International ARA Naphtha':'Naptha',
+    'PJK International ARA Jet-Kero':'Jet-Kero',
+    'US Crude Stock':'Crude',
+    'Cushing Crude Stock':'Cushing Crude',
+    'DOE Gasoline Stock':'Gasoline',
+    'DOE Distillates Stock':'Distillates',
+    'DOE Residue Stocks':'Fuel Oil',
+    'DOE Refinery Utilisation':'Refinery Utilisation',
+    'Sing LD stocks':'Light Dist.',
+    'Sing MD Stocks':'Middle Dist.',
+    'Sing Resd Stocks':'Residue',
+    'S4 Crude Shandong Stock Weekly':'Crude',
+    'S4 Fuel Oil Shandong Stk Weekl':'Fuel Oil',
+    'S4 Gasoline Stock Shandong M':'Gasoline',
+    'S4 Diesel Stock Shandong M':'Diesel'
+}
+
+ara_cols=(
+        'Date',
+        'Genscape ARA Crude Total Tank',
+        'PJK International ARA Gas Oil',
+        'PJK International ARA Gasoline',
+        'PJK International ARA Fuel Oil',
+        'PJK International ARA Naphtha',
+        'PJK International ARA Jet-Kero'
+)
+
+ara_conv=['Genscape ARA Crude Total Tank']
+
+ara_units=['Genscape ARA Crude Total Tank',
+        'PJK International ARA Gas Oil',
+        'PJK International ARA Gasoline',
+        'PJK International ARA Fuel Oil',
+        'PJK International ARA Naphtha',
+        'PJK International ARA Jet-Kero']
+
+
+us_eia_cols=(
+    'Date',
+    'US Crude Stock',
+    'Cushing Crude Stock',
+    'DOE Gasoline Stock',
+    'DOE Distillates Stock',
+    'DOE Residue Stocks',
+    'DOE Refinery Utilisation'
+)
+
+
+us_conv=['US Crude Stock','Cushing Crude Stock','DOE Gasoline Stock','DOE Distillates Stock','DOE Residue Stocks']
+us_units=['US Crude Stock','Cushing Crude Stock','DOE Gasoline Stock','DOE Distillates Stock','DOE Residue Stocks']
+
+
+sing_cols=(
+    'Date',
+    'Sing LD stocks',
+    'Sing MD Stocks',
+    'Sing Resd Stocks'
+)
+
+sing_conv=['Sing LD stocks','Sing MD Stocks','Sing Resd Stocks']
+sing_units=['Sing LD stocks','Sing MD Stocks','Sing Resd Stocks']
+
+china_cols=(
+    'Date',
+    'S4 Crude Shandong Stock Weekly',
+    'S4 Fuel Oil Shandong Stk Weekl',
+    'S4 Gasoline Stock Shandong M',
+    'S4 Diesel Stock Shandong M'
+)
+
+china_conv=['S4 Crude Shandong Stock Weekly','S4 Fuel Oil Shandong Stk Weekl','S4 Gasoline Stock Shandong M','S4 Diesel Stock Shandong M']
+china_units=['S4 Crude Shandong Stock Weekly','S4 Fuel Oil Shandong Stk Weekl','S4 Gasoline Stock Shandong M','S4 Diesel Stock Shandong M']
+
+cftc_cols=(
+    'Date',
+    'WTI CFTC Managed Money',
+    'Brent CFTC Managed Money'
+)
+
+cftc_conv=[
+    'WTI CFTC Managed Money',
+    'Brent CFTC Managed Money'
+]
+
+dollar_index_cols=(
+    'Date',
+    'Dollar Index',
+    'DOLLAR INDEX CORRELATION WITH BRENT'
+)
+
+eur_index_cols=(
+    'Date',
+    'EURO ',
+    'EUR CORRELATION WITH BRENT'
+)
+
+inr_cols=(
+    'Date',
+    'Indian Rupee'
+)
+
+currency_cols=(
+    'Dollar Index',
+    'EURO ',
+    'Indian Rupee'
+)
+
+currency_corr_cols=[
+    'Date',
+    'Currency',
+    'Value',
+    'Daily Change',
+    'Correlation'
+]
+
+other_assets_cols={
+    'Equity':['Date','Dow Jones','S&P 500','UK FTSE','Germany DAX','Japan NKY','Hong Kong Hang Seng','India NIFTY','DOW Jones & Ol Correl'],
+    'Bonds':['Date','US 10YR Treasury','US 3YR Treasury','US 1 Month','UK 10K Government Bond'],
+    'Precious Metals':['Date','Gold','Platinum','Gold & Oil Correl']
+}
+
+other_assets_corr_cols={
+    'Equity':['Dow Jones','DOW Jones & Ol Correl'],
+    'Precious Metals':['Gold','Gold & Oil Correl']
+}
+
+refinery_outage_cols=(
+    'Date',
+    'Total Global CDU Outage',
+    'Total United States CDU Outage',
+    'Total Latin America CDU Outage',
+    'Total Northwest Europe CDU Outage',
+    'Total Mediterranean CDU Outage',
+    'Total Middle East CDU Outage',
+    'Total China CDU Outage',
+    'Total Other Asia Pacific CDU Outage'
+)
+
+refinery_capacity={
+    'Total Global CDU Outage':102813,
+    'Total United States CDU Outage':20140,
+    'Total Latin America CDU Outage':7913,
+    'Total Northwest Europe CDU Outage':8352,
+    'Total Mediterranean CDU Outage':4868,
+    'Total Middle East CDU Outage':1975,
+    'Total China CDU Outage':15275,
+    'Total Other Asia Pacific CDU Outage':16469
+}
+
+refinery_margins={
+    'Singapore Dubai Topping Refine':'Singapore',
+    'Singapore Dubai FCC Refinery M':'Singapore',
+    'Singapore Dubai Hydrocracking':'Singapore',
+    'Singapore Dubai Hydroskimming':'Singapore',
+    'NWE Forties Topping Refinery M':'Europe',
+    'NWE Forties FCC Refinery Margi':'Europe',
+    'NWE Forties Hydrocracking Refi':'Europe',
+    'NWE Forties Hydroskimming Refi':'Europe',
+    'NWE Urals Topping Refinery Mar':'Med',
+    'NWE Urals FCC Refinery Margin':'Med',
+    'NWE Urals Hydrocracking Refine':'Med',
+    'NWE Urals Hydroskimming Refine':'Med',
+    'USGC WTI Topping Refinery Marg':'USGC',
+    'USGC WTI FCC Refinery Margin':'USGC',
+    'USGC WTI Coking Refinery Margi':'USGC',
+    'USGC WTI Hydroskimming Refiner':'USGC',
+}
+
+tech_dict={
+    'HT014':'MovAvg_5D',
+    'HT017':'MovAvg_10D',
+    'HT020':'MovAvg_20D',
+    'HT004':'RSI_9D',
+    'MACD1':'MACD',
+    'HT033':'DMI+',
+    'HT034':'DMI-',
+    'PX_SETTLE':'Spot Price',
+    'PP':'Pivot Point'
+}
+
+ref_reg_list=[]
+
+for i in refinery_margins.keys():
+    ref_reg_list.append(refinery_margins[i])
+
+ref_reg_list=list(set(ref_reg_list))
+
+geopolitical_volatility_cols=[
+    'Date',
+    'Geo USA',
+    'Goe South Korea',
+    'Geo Saudi Arabia',
+    'Geo United Kingdom',
+    'Geo Brazil',
+    'Geo Venezuela',
+    'Geo China',
+    'Geo India',
+    'Geo Iran',
+    'Geo Japan'
+]
+
+
+
+def rigdata(filename=gfilename,finalfile='rigcount.csv',collection_final=None):
+    df=pd.read_excel(filename,sheet_name=gsheetname,usecols={'Date','Baker Hughes Oil Rig Count'},skiprows=[1])
+    df = df[df['Date'].notna()]
+    df=df.bfill()
+    df = df.replace(to_replace=np.nan, value=0).dropna()
+    df['Country'] = 'US'
+    df=generate_stats(df,'Baker Hughes Oil Rig Count',1)
+    df['Sentiment']=margin_flash(df['Margin'])
+    df['Date'] = df['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date']
+    pushfile(collection_trim(df,fetchexcel(find_previous(collection_files['rig_count'])),merge_cols),finalfile) # Differential file
+    pushfile(df,collection_final) # Collection file
+
+
+def stockdata(filename=gfilename,finalfile='stocks.csv',collection_final=None):
+    ara_data=data_processing(filename,gsheetname,'ARA',ara_cols,ara_units,ara_conv,'Stocks')
+    us_data=data_processing(filename,gsheetname,'US EIA',us_eia_cols,us_units,us_conv,'Stocks')
+    sing_data=data_processing(filename,gsheetname,'SING',sing_cols,sing_units,sing_conv,'Stocks')
+    china_data=data_processing(filename,gsheetname,'CHINA',china_cols,china_units,china_conv,'Stocks')
+    data=ara_data.append(us_data).append(sing_data).append(china_data)
+    data=data[['Date','Entity','Commodity','Stocks','Unit','Weekly Change','4 Week Average','4 Week Change','YOY','YOY Change','Margin','Net Margin','Order']]
+    data['Commodity']=data['Commodity'].replace(stocks_names_proper)
+    data['Sentiment']=margin_flash(data['Net Margin'],1)
+    data['Date'] = data['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date','Entity','Commodity']
+    pushfile(collection_trim(data,fetchexcel(find_previous(collection_files['stocks'])),merge_cols),finalfile) # Differential file
+    pushfile(data,collection_final) # Collection file
+
+def cftcdata(filename=gfilename,finalfile='cftc.csv',collection_final=None):
+    cftc_data=data_processing(filename,gsheetname,'CFTC Managed Money',cftc_cols,[],cftc_conv,'Contracts')
+    cftc_data=cftc_margin(cftc_data,'Margin',len(cftc_cols)-1)
+    # cftc_data.to_csv(finalfile,index=False)
+    cftc_data['Sentiment']=margin_flash(cftc_data['Net Margin'])
+    cftc_data['Date'] = cftc_data['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date','Entity','Commodity']
+    pushfile(collection_trim(cftc_data,fetchexcel(find_previous(collection_files['cftc'])),merge_cols),finalfile) # Differential file
+    pushfile(cftc_data,collection_final) # Collection file
+
+def curr_corr_data(filename=gfilename,finalfile='currency_correlation.csv',collection_final=None):
+    dollar=corr_arrange(filename,gsheetname_d,dollar_index_cols)
+    eur=corr_arrange(filename,gsheetname_d,eur_index_cols)
+    inr=corr_arrange(filename,gsheetname_d,inr_cols)
+    data=dollar.append(eur,sort=True).append(inr,sort=True)
+    data['Order']=data['Currency'].apply(lambda x: currency_cols.index(x))
+    data=data.sort_values(['Date','Order'],ascending=(False,True)).reset_index(drop=True)
+    data=data[currency_corr_cols]
+    data['Correlation']=data['Correlation']*100
+    data['Margin']=curr_corr_margin_calc(data,'Correlation',3)
+    data['Sentiment']=margin_flash(data['Margin'])
+    data['Date'] = data['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date','Currency']
+    pushfile(collection_trim(data,fetchexcel(find_previous(collection_files['currency_correlation'])),merge_cols),finalfile) # Differential file
+    pushfile(data,collection_final) # Collection file
+
+def corr_arrange(filename,sheetname,cols):
+    data=pd.read_excel(filename,sheet_name=sheetname,usecols=cols,skiprows=[1])
+    data = data[data['Date'].notna()]
+    data=data.bfill()
+    if len(cols)==3:
+        data=data.rename(columns={cols[2]:'Correlation',cols[1]:'Value'})
+    elif len(cols)==2:
+        data=data.rename(columns={cols[1]:'Value'})
+    data['Currency']=cols[1]
+    data['Daily Change'] = pd.Series(data['Value'].values).diff(periods=-1)
+    return data
+
+
+
+def refinery_outage_data(filename=gfilename,finalfile='refinery_outage.csv',collection_final=None):
+    data=pd.read_excel(filename,sheet_name=gsheetname_d,usecols=refinery_outage_cols,skiprows=[1])
+    data = data[data['Date'].notna()]
+    data = data.replace(to_replace=np.nan, value=0)
+    data=pd.melt(data,id_vars=['Date'], var_name=['Region'], value_name='Outage')
+    data['Order']=data['Region'].apply(lambda x: refinery_outage_cols.index(x))
+    data=data.sort_values(['Date','Order'],ascending=(False,True)).reset_index(drop=True)
+    data=generate_stats(data,'Outage',len(refinery_outage_cols)-1,7)
+    data['Capacity']=data['Region'].apply(lambda x: refinery_capacity[x])
+    data['Outage %']=(data['Outage']/data['Capacity'])*100
+    data['Margin']=data['Outage %'].apply(lambda x: -1 if x > 5 else 0)
+    data['Sentiment']=margin_flash(data['Margin'])
+    data['Date'] = data['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date','Region']
+    pushfile(collection_trim(data,fetchexcel(find_previous(collection_files['refinery_outage'])),merge_cols),finalfile) # Differential file
+    pushfile(data,collection_final) # Collection file
+
+def refinery_margin_data(filename=gfilename,finalfile='refinery_margins.csv',collection_final=None):
+    refinery_margin_cols=list(refinery_margins.keys())
+    refinery_margin_cols.append('Date')
+    data=pd.read_excel(filename,sheet_name=gsheetname_d,usecols=refinery_margin_cols,skiprows=[1])
+    data = data[data['Date'].notna()]
+    data=data.bfill()
+    data = data.replace(to_replace=np.nan, value=0)
+    data=pd.melt(data,id_vars=['Date'], var_name=['Specific'], value_name='Margin')
+    data['Order']=data['Specific'].apply(lambda x: refinery_margin_cols.index(x))
+    data=data.sort_values(['Date','Order'],ascending=(False,True)).reset_index(drop=True)
+    data=generate_stats(data,'Margin',len(refinery_margin_cols)-1,7)
+    data['Region']=data['Specific'].apply(lambda x: refinery_margins[x])
+    data['Sentiment']=ref_margin_calc(data,'Weekly Change',len(refinery_margin_cols)-1)
+    data['Date'] = data['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date','Specific']
+    pushfile(collection_trim(data,fetchexcel(find_previous(collection_files['refinery_margins'])),merge_cols),finalfile) # Differential file
+    pushfile(data,collection_final) # Collection file
+
+
+def geopolitical_volatility_data(filename=gfilename,finalfile='geopolitical_volatility.csv',collection_final=None):
+    data=pd.read_excel(filename,sheet_name=gsheetname_d,usecols=geopolitical_volatility_cols,skiprows=[1])
+    data = data[data['Date'].notna()]
+    data=data.bfill()
+    data = data.replace(to_replace=np.nan, value=0)
+    data=pd.melt(data,id_vars=['Date'], var_name=['Region'], value_name='Index')
+    data=data.sort_values(['Date','Region'],ascending=(False,False)).reset_index(drop=True)
+    data['Index Last Day']=data['Index'].shift(periods=-1*(len(geopolitical_volatility_cols)-1))
+    data['DoD Change']=data['Index']-data['Index Last Day']
+    data['Date'] = data['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date','Region']
+    pushfile(collection_trim(data,fetchexcel(find_previous(collection_files['geopolitical_volatility'])),merge_cols),finalfile) # Differential file
+    pushfile(data,collection_final) # Collection file
+
+def opec_prod_data(filename=gfilename,finalfile='opec_prod.csv',collection_final=None):
+    data=pd.read_excel(filename,sheet_name=opec_sheet,header=None,skiprows=[1])
+    df=data[data.columns[-4:]]
+    df.columns=df.iloc[0]
+    df=df.drop(df.index[0])
+    df.columns = df.columns.fillna('Date')
+    df=pd.melt(df,id_vars=['Date'], var_name=['Specific'], value_name='Amount')
+    df=df.sort_values(['Date','Specific'],ascending=(False,True)).reset_index(drop=True)
+    df['Amount']=df['Amount']/1000
+    df['Monthly Change'] = pd.Series(df['Amount'].values).diff(periods=-3)
+    df['Margin']=opec_margin_calc(df,'Monthly Change',3) #newedit
+    df['Sentiment']=margin_flash(df['Margin'])
+    df['Date'] = df['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date','Specific']
+    pushfile(collection_trim(df,fetchexcel(find_previous(collection_files['opec'])),merge_cols),finalfile) # Differential file
+    pushfile(df,collection_final) # Collection file
+
+def key_agency_data(finalfile='key_agency_forecast.csv'):
+    eia_cur=eia_data(input_files['eia_report'],'3dtab','Current')
+    eia_last=eia_data(find_previous(input_files['eia_report']),'3dtab','Previous')
+    eia_df=eia_cur.append(eia_last).sort_values(['Type'],ascending=(True))
+    eia_df['Change of Changes'] = pd.Series(eia_df['Change'].values).diff(periods=-1)
+    iea_cur=iea_data(input_files['iea_report'],'Current')
+    iea_last=iea_data(find_previous(input_files['iea_report']),'Previous')
+    iea_df=iea_cur.append(iea_last).sort_values(['Type'],ascending=(True))
+    iea_df['Change of Changes'] = pd.Series(iea_df['Change'].values).diff(periods=-1)
+    df=eia_df.append(iea_df)
+    avg_chg=sum(df['Change'])/len(df['Change'])
+    opec_cur=opec_data(input_files['opec_report'],'Table 11 - 1','Current',df.columns,avg_chg)
+    opec_last=opec_data(find_previous(input_files['opec_report']),'Table 11 - 1','Previous',df.columns,avg_chg)
+    opec_df=opec_cur.append(opec_last).sort_values(['Type'],ascending=(True))
+    opec_df['Change of Changes'] = pd.Series(opec_df['Change'].values).diff(periods=-1)
+    df=eia_df.append(iea_df).append(opec_df)
+    df['Date']=current_date
+    if len(list(filter(lambda x: (x>0),df['Change of Changes'])))>len(list(filter(lambda x: (x<0),df['Change of Changes']))):
+        df['Margin']=1
+    elif len(list(filter(lambda x: (x>0),df['Change of Changes'])))<len(list(filter(lambda x: (x<0),df['Change of Changes']))):
+        df['Margin']=-1
+    else:
+        df['Margin']=0
+    df['Sentiment']=margin_flash(df['Margin'])
+    # df.to_csv(finalfile,index=False)
+    pushfile(df,finalfile)
+    
+
+def iea_data(filename,type):
+    package={}
+    curdf=pd.read_excel(filename,header=None)
+    demand_index=list(curdf[0]).index('Total Demand')
+    fuel_cons=list(curdf.iloc[demand_index])
+    years=list(curdf.iloc[demand_index-2])
+    amt1=fuel_cons[-1]
+    package.update({str(int(years[-1])):amt1})
+    amt2=fuel_cons[-2]
+    package.update({str(int(years[-2])):amt2})
+    package.update({'Report':'IEA'})
+    package.update({'Type':type})
+    if years[-1]>years[-2]:
+        package.update({'Change':amt1-amt2})
+    else:
+        package.update({'Change':amt2-amt1})
+    df=pd.DataFrame(package,index=[0,])
+    return df
+
+def eia_data(filename,sheetname,type):
+    package={}
+    curdf=pd.read_excel(filename,sheet_name=sheetname,header=None,skiprows=[0,1])
+    curdf.iloc[0]=curdf.iloc[0].fillna(method='ffill')
+    fuel_cons=curdf.iloc[list(curdf[0]).index('patc_world')]
+    sum=reduce(lambda x,y: x+y,fuel_cons[-12:])
+    avg_cur=sum/12
+    package.update({str(int(list(curdf.iloc[0])[-12])):avg_cur})
+    sum=reduce(lambda x,y: x+y,fuel_cons[-24:-12])
+    avg_last=sum/12    
+    package.update({str(int(list(curdf.iloc[0])[-24])):avg_last})
+    package.update({'Report':'EIA'})
+    package.update({'Type':type})
+    package.update({'Change':avg_cur-avg_last})
+    df=pd.DataFrame(package,index=[0,])
+    return df
+
+def opec_data(filename,sheetname,type,ylist,change):
+    package={}
+    curdf=pd.read_excel(filename,sheet_name=sheetname,header=None)
+    curdf=curdf[curdf.columns[1:-1]]
+    od=list(curdf.iloc[list(curdf[1]).index('(a) Total world demand')])
+    years=list(curdf.iloc[4])
+    dem1=0
+    y1=0
+    if str(int(years[-1])) in ylist:
+        package.update({str(int(years[-1])):od[-1]})
+        y1=int(years[-1])
+        dem1=od[-1]
+    if str(int(years[-6])) in ylist:
+        package.update({str(int(years[-6])):od[-6]})
+        y2=int(years[-6])
+        dem2=od[-6]
+    else:
+        package.update({str(int(years[-1])+1):od[-1]+change})
+        y2=int(years[-1])+1
+        dem2=od[-1]+change
+    package.update({'Report':'OPEC'})
+    package.update({'Type':type})
+    if y1>y2:
+        package.update({'Change':dem1-dem2})
+    else:
+        package.update({'Change':dem2-dem1})
+    df=pd.DataFrame(package,index=[0,])
+    return df
+
+
+
+def other_assets_data(filename=gfilename,finalfile='other_assets.csv',collection_final=None):
+    alltogether=[]
+    df=pd.DataFrame()
+    for kpi in other_assets_cols:
+        flag=0
+        cols=other_assets_cols[kpi]
+        count=len(cols)-1
+        data=pd.read_excel(filename,sheet_name=gsheetname_d,usecols=cols,skiprows=[1])
+        data = data[data['Date'].notna()]
+        data=data.bfill()
+        if kpi in list(other_assets_corr_cols.keys()):
+            dfmain=data[list(x for x in cols if x not in other_assets_corr_cols[kpi])]
+        else:
+            dfmain=data[cols]
+        dfmain=pd.melt(dfmain,id_vars=['Date'], var_name=['Particular'])
+        dfmain=dfmain.rename(columns={'value': 'Value'})
+        dfmain['KPI']=kpi
+
+        if kpi in list(other_assets_corr_cols.keys()):
+            cors=other_assets_corr_cols[kpi]
+            cors.append('Date')
+            dfcor=data[cors]
+            dfcor=dfcor.rename(columns={'value': 'Value'})
+            dfcor['KPI']=kpi
+            dfcor['Particular']=cors[0]
+            dfcor=dfcor.rename(columns={cors[0]: 'Value'})
+            dfcor=dfcor.rename(columns={cors[1]: 'Correlation with Oil'})
+            flag=1
+            count-=1
+        if flag==1:
+            finaldata=dfmain.append(dfcor)
+        else:
+            finaldata=dfmain
+        finaldata['Order']=finaldata['Particular'].apply(lambda x: cols.index(x))
+        finaldata=finaldata.sort_values(['Date','Order'],ascending=(False,True)).reset_index(drop=True)
+        finaldata['Daily Change'] = pd.Series(finaldata['Value'].values).diff(periods=-1*count)
+        alltogether.append(finaldata)
+    i=0
+    while i<len(other_assets_cols.keys()):
+        df=df.append(alltogether[i])
+        i+=1
+    df['Date'] = df['Date'].dt.strftime(r'%Y-%m-%d')
+    merge_cols=['Date','KPI','Particular']
+    pushfile(collection_trim(df,fetchexcel(find_previous(collection_files['other_assets'])),merge_cols),finalfile) # Differential file
+    pushfile(df,collection_final) # Collection file
+
+def technicals(filename='Crude_Source/Dashboard.xlsm',finalfile='technicals.csv'):
+    df=pd.read_excel(filename,'Tech',header=None)
+    final=pd.DataFrame()
+    df_brent=df.iloc[:,:19]
+    df_brent=df_brent.iloc[1:3]
+    df_brent.iloc[0,0]='Date'
+    df_brent.columns=df_brent.iloc[0]
+    df_brent.reset_index(drop=True,inplace=True)
+    df_brent.drop(0,inplace=True)
+    df_brent['Margin']=tech_margin_logic(df_brent)
+    df_brent.rename(tech_dict,axis='columns',inplace=True)
+    df_brent=pd.melt(df_brent,id_vars=['Date','Margin'],var_name=['Specific'],value_name='Amount')
+    df_brent['Instrument']='Brent'
+    df_wti=df.iloc[:,21:-2]
+    df_wti=df_wti.iloc[1:3]
+    df_wti.iloc[0,0]='Date'
+    df_wti.columns=df_wti.iloc[0]
+    df_wti.reset_index(drop=True,inplace=True)
+    df_wti.drop(0,inplace=True)
+    df_wti['Margin']=tech_margin_logic(df_wti)
+    df_wti.rename(tech_dict,axis='columns',inplace=True)
+    df_wti=pd.melt(df_wti,id_vars=['Date','Margin'],var_name=['Specific'],value_name='Amount')
+    df_wti['Instrument']='WTI'
+    final=df_brent.append(df_wti,sort=True)
+    # final.to_csv(finalfile,index=False)
+    pushfile(final,finalfile)
+
+def tech_margin_logic(df):
+    mov_score=0
+    stud_score=0
+    if list(df['PX_SETTLE'])[0]>list(df['HT014'])[0]:
+        mov_score+=1
+    else:
+        mov_score-=1
+    if list(df['PX_SETTLE'])[0]>list(df['HT017'])[0]:
+        mov_score+=1
+    else:
+        mov_score-=1
+    if list(df['PX_SETTLE'])[0]>list(df['HT020'])[0]:
+        mov_score+=1
+    else:
+        mov_score-=1
+    if list(df['HT004'])[0]<50:
+        stud_score-=1
+    else:
+        stud_score+=1
+    if list(df['MACD1'])[0]<0:
+        stud_score-=1
+    else:
+        stud_score+=1
+    if list(df['HT034'])[0]>list(df['HT033'])[0]:
+        stud_score-=1
+    else:
+        stud_score+=1
+    mov_score=mov_score/3
+    stud_score=stud_score/3
+    net=(mov_score+stud_score)/2
+    if net<-2/3:
+        return 'STRONG BEAR'
+    elif net>=-2/3 and net <-1/3:
+        return 'BEAR'
+    elif net>=-1/3 and net<=1/3:
+        return 'NEUTRAL'
+    elif net>1/3 and net<=2/3:
+        return 'BULL'
+    elif net>2/3:
+        return 'STRONG BULL'
+     
+
+
+def key_events(filename='key_events_input.xlsx',finalfile='key_events.csv'):
+    events_df=pd.read_csv(io.BytesIO(filename),encoding='utf8')
+    events_df['Date']=current_date
+    # events_df.to_csv(finalfile,index=False)
+    pushfile(events_df,finalfile)
+
+def cftc_margin(df,field,pack):
+    margin_list=df[field]
+    rlist=[]
+    i=0
+    while i<len(margin_list):
+        j=0
+        f=0
+        sum=0
+        while j<pack:
+            sum+=margin_list[i+j]
+            j+=1
+        if sum>0:
+            while f<pack:
+                rlist.append(1)
+                f+=1
+        elif sum<0:
+            while f<pack:
+                rlist.append(-1)
+                f+=1
+        else:
+            while f<pack:
+                rlist.append(0)
+                f+=1
+        i+=pack
+    df['Net Margin']=rlist
+    return df
+
+def ref_margin_calc(data,field,pack):
+    rlist=[]
+    alist=data[field]
+    slist=data['Specific']
+    datelist=data['Date']
+    left=[]
+    i=0
+    while i < len(alist):
+        t=0
+        f=0
+        filler=0
+        netmarg=0
+        topcount=0
+        fcccount=0
+        while t<pack:
+                if 'Topping' in slist[i+t] and alist[i+t]>0:
+                    topcount+=1
+                t+=1
+        while f<pack:
+                if 'FCC' in slist[i+f] and alist[i+f]>0:
+                    fcccount+=1
+                f+=1
+        netmarg=topcount*0.3+fcccount*0.7
+        if (netmarg/4) > 0.5:
+            while filler < pack:
+                rlist.append('Bullish')
+                filler+=1
+        elif (netmarg/4) < 0.5:
+            while filler < pack:
+                rlist.append('Bearish')
+                filler+=1
+        else:
+            while filler < pack:
+                rlist.append('Neutral')
+                filler+=1
+        i+=pack
+    return rlist
+
+
+def opec_margin_calc(data,field,pack):
+    rlist=[]
+    alist=data[field]
+    slist=data['Specific']
+    left=[]
+    margin=0
+    i=0
+    while i < len(alist):
+        t=0
+        filler=0
+        while t<pack:
+                if 'OPEC SPARE CAPACITY' in slist[i+t] and alist[i+t]>0:
+                    margin=-1
+                elif 'OPEC SPARE CAPACITY' in slist[i+t] and alist[i+t]<0:
+                    margin=1
+                elif 'OPEC SPARE CAPACITY' in slist[i+t] and alist[i+t]==0:
+                    margin=0
+                t+=1
+        while filler < pack:
+                rlist.append(margin)
+                filler+=1
+        i+=pack
+    return rlist
+
+        
+
+def curr_corr_margin_calc(data,field,pack):
+    rlist=[]
+    alist=data[field]
+    slist=data['Currency']
+    left=[]
+    margin=0
+    i=0
+    while i < len(alist):
+        t=0
+        filler=0
+        while t<pack:
+                if 'EURO' in slist[i+t] and alist[i+t]>0 and alist[i+t]<70:
+                    margin=0
+                elif 'EURO' in slist[i+t] and alist[i+t]>=70:
+                    margin=1
+                elif 'EURO' in slist[i+t] and alist[i+t]<=0:
+                    margin=-1
+                t+=1
+        while filler < pack:
+                rlist.append(margin)
+                filler+=1
+        i+=pack
+    return rlist
+
+
+
+def data_processing(filename,sheetname,entity,cols,unit_list,convert_list,items):
+    data=pd.read_excel(filename,sheet_name=sheetname,usecols=cols,skiprows=[1])
+    data = data[data['Date'].notna()]
+    data=data.bfill()
+    data = data.replace(to_replace='None', value=np.nan).dropna()
+    for i in convert_list:
+        data[i]=data[i]/1000
+    data=pd.melt(data,id_vars=['Date'], var_name=['Commodity'])
+    if len(unit_list)!=0:
+        data['Unit']=data['Commodity'].apply(lambda x: 'Mbbl' if x in convert_list and x in unit_list else 'KT' if x in unit_list else '')
+    data=data.replace(to_replace='None', value=np.nan).dropna()
+    data=data.rename(columns={"value": items})
+    data['Entity'] = entity
+    data['Order']=data['Commodity'].apply(lambda x: cols.index(x))
+    data=data.sort_values(['Date','Order'],ascending=(False,True)).reset_index(drop=True)
+    data=generate_stats(data,items,len(cols)-1)
+    data=net_margin_generator(data,unit_list,len(cols)-1,entity)
+    return data
+
+def fourweekavg(ser,pack,days=1):
+    index=0
+    alist=[]
+    for i in ser:
+        j=1
+        sum=0
+        if index<len(ser)-4*pack*days:
+            while j<=4*days:
+                sum+=ser[index+j*pack]
+                j+=1
+            alist.append(sum/(4*days))
+        else:
+            alist.append(0)
+        index+=1
+    return alist
+
+def yoy(ser,pack,days=1):
+    index=0
+    alist=[]
+    for i in ser:
+        if index<len(ser)-52*pack*days:
+            alist.append(ser[index+52*pack*days])
+        else:
+            alist.append(0)
+        index+=1
+    return alist
+
+
+def margin_eval(s1,s2):
+    result=[]
+    i=0
+    while i<len(s1):
+        if s1[i]>0:
+            if s2[i]>=0:
+                result.append(1)
+            else:
+                result.append(0)
+        elif s1[i]<0:
+            if s2[i]>0:
+                result.append(0)
+            else:
+                result.append(-1)
+        elif s1[i]==0:
+            if s2[i]>0:
+                result.append(1)
+            elif s2[i]<0:
+                result.append(-1)
+            else:
+                result.append(0)
+        i+=1
+    return result
+        
+        
+
+
+def generate_stats(df,field,pack,days=1):
+    df=df.copy(deep=True)
+    df.reset_index(drop=True,inplace=True)
+    if days==1:
+        df['Weekly Change'] = pd.Series(df[field].values).diff(periods=-1*pack)
+    else:
+        df['Daily Change'] = pd.Series(df[field].values).diff(periods=-1*pack)
+        df['Weekly Change'] = pd.Series(df[field].values).diff(periods=-7*pack)
+    df = df.replace(to_replace=np.nan, value=0)
+    df['4 Week Average']=fourweekavg(df[field].values,pack,days)
+    df['4 Week Change']=df[field]-df['4 Week Average']
+    df['YOY']=yoy(df[field].values,pack,days)
+    df['YOY Change']=df[field]-df['YOY']
+    if days==1:
+        df['Margin']=margin_eval(df['Weekly Change'],df['4 Week Change'])        
+    return df
+
+
+
+def net_margin_generator(df,coms,pack,market):
+    df=df.copy(deep=True)
+    alist=df['Weekly Change']
+    rlist=[]
+    flag=0
+    i,j=0,0
+    while i<len(alist):
+            if market=='ARA':
+                netmargin=((((alist[i+coms.index('PJK International ARA Gas Oil')]*7.45)*.3)+((alist[i+coms.index('PJK International ARA Gasoline')]*8.33)*.4)+((alist[i+coms.index('PJK International ARA Fuel Oil')]*6.35)*.05)+((alist[i+coms.index('PJK International ARA Naphtha')]*9)*.1)+((alist[i+coms.index('PJK International ARA Jet-Kero')]*7.88)*.15))/1000)+alist[i+coms.index('Genscape ARA Crude Total Tank')]
+            elif market=='US EIA':
+                netmargin=(alist[i+coms.index('DOE Gasoline Stock')]*.5)+(alist[i+coms.index('DOE Distillates Stock')]*.4)+(alist[i+coms.index('DOE Residue Stocks')]*.10)+alist[i+coms.index('US Crude Stock')]
+            elif market=='SING':
+                netmargin=(alist[i+coms.index('Sing MD Stocks')]*.5)+(alist[i+coms.index('Sing LD stocks')]*.35)+(alist[i+coms.index('Sing Resd Stocks')]*.15)
+            elif market=='CHINA':
+                netmargin=alist[i+coms.index('S4 Crude Shandong Stock Weekly')]+(alist[i+coms.index('S4 Fuel Oil Shandong Stk Weekl')]*.2)+(alist[i+coms.index('S4 Gasoline Stock Shandong M')]*.3)+(alist[i+coms.index('S4 Diesel Stock Shandong M')]*.35)
+            else:
+                flag=1
+            i=i+pack
+            j=0
+            while j<pack and flag==0:
+                rlist.append(netmargin)
+                j+=1
+    if flag==0:
+        df['Net Margin']=rlist
+    return df
+
+
+
+def volatility_skew(filename='Dashboard.xlsx',yesterdays_file='Dashboard.xlsx',finalfile='crude_volatility.csv'):
+    df=pd.read_excel(filename,'VolSKew',header=None) # Current file
+    df.columns=df.iloc[0]
+    df.drop(0,inplace=True)
+    df.columns.name=None
+    vs={}
+    vso={}
+    ind=0
+    for i,j in enumerate(list(df.iloc[:,0])):
+        if '2) ' in j:
+            ind=i
+    vs['today']=vol_skew_processing(df.iloc[:ind])
+    vs['yesterday']=vol_skew_processing(df.iloc[ind:])
+    final=skew_margin(vs)
+    df=pd.read_excel(yesterdays_file,'VolSKew',header=None) # Yesterday's file
+    df.columns=df.iloc[0]
+    df.drop(0,inplace=True)
+    df.columns.name=None
+    ind=0
+    for i,j in enumerate(list(df.iloc[:,0])):
+        if '2) ' in j:
+            ind=i
+    vso['dby']=vol_skew_processing(df.iloc[ind:])
+    final_dbo=skew_margin(vso)
+    final_dbo.drop('Expiry',1,inplace=True)
+    final=final.merge(final_dbo, on=['Term','Instrument','Delta'], how = 'inner')
+    final['Call Change']=final['Call today']-final['Call yesterday']
+    final['Put Change']=final['Put today']-final['Put yesterday']
+    final['Net Change']=final['Call Change']-final['Put Change']
+    final['Call Change Yesterday']=final['Call yesterday']-final['Call dby']
+    final['Put Change Yesterday']=final['Put yesterday']-final['Put dby']
+    final['Net Change Yesterday']=final['Call Change Yesterday']-final['Put Change Yesterday']
+    final['Sentiment']=margin_flash(final['Net Change'])
+    final['Date']=current_date
+    pushfile(final,finalfile)
+    
+
+    
+######## Model Score ########
+
+def model_score(filename='Model_Score.csv',finalfile='modelscore.csv'):
+    df=pd.read_csv(io.BytesIO(filename),encoding='utf8')    
+    df = df[df['Date'].notna()]
+    if isinstance(df['Date'][0],datetime):
+        df['Date']=df['Date'].dt.strftime(r'%Y-%m-%d %H:%S')
+    else:
+        df['Date']=pd.to_datetime(df['Date']).dt.strftime(r'%Y-%m-%d %H:%M')
+    pushfile(df,finalfile)
+
+###### Common ########
+
+def distancing(elist):
+    i=0
+    rlist=[]
+    ref=elist[0]
+    rlist.append(elist[0])
+    while i < len(elist)-1:
+        if elist[i+1] - ref >=2:
+            rlist.append(elist[i+1])
+        ref=elist[i+1]
+        i+=1
+    return rlist
+
+
+def skew_margin(df_list):
+    final=pd.DataFrame()
+    brent={}
+    wti={}
+    for key in df_list:
+        dfs=df_list[key]
+        for i in dfs:
+            if list(i['Instrument'])[0]=='BRENT':
+                if list(i['Specific'])[0]=='CALL':
+                    brent['call'+' '+key]=pd.melt(i,id_vars=['Term','Expiry','Instrument','Specific'],var_name=['Delta'],value_name='Call '+key)
+                elif list(i['Specific'])[0]=='PUT':
+                    brent['put'+' '+key]=pd.melt(i,id_vars=['Term','Expiry','Instrument','Specific'],var_name=['Delta'],value_name='Put '+key)
+            elif list(i['Instrument'])[0]=='WTI':
+                if list(i['Specific'])[0]=='CALL':
+                    wti['call'+' '+key]=pd.melt(i,id_vars=['Term','Expiry','Instrument','Specific'],var_name=['Delta'],value_name='Call '+key)
+                elif list(i['Specific'])[0]=='PUT':
+                    wti['put'+' '+key]=pd.melt(i,id_vars=['Term','Expiry','Instrument','Specific'],var_name=['Delta'],value_name='Put '+key)
+
+    brent_complete=pd.DataFrame()
+    wti_complete=pd.DataFrame()
+    count=0
+    for i in brent:
+        brent[i].drop('Specific',1,inplace=True)
+        if brent_complete.empty:
+            brent_complete=brent[i]
+        else:
+            if 'Expiry' in brent_complete.columns:
+                brent[i].drop('Expiry',1,inplace=True)
+            brent_complete=brent_complete.merge(brent[i], on=['Term','Instrument','Delta'], how = 'inner')
+        count+=1
+    for i in wti:
+        wti[i].drop('Specific',1,inplace=True)
+        if wti_complete.empty:
+            wti_complete=wti[i]
+        else:
+            if 'Expiry' in wti_complete.columns:
+                wti[i].drop('Expiry',1,inplace=True)
+            wti_complete=wti_complete.merge(wti[i], on=['Term','Instrument','Delta'], how = 'inner')
+    complete=brent_complete.append(wti_complete,sort=True)
+    return complete
+
+
+
+
+
+def vol_skew_processing(df_o):
+    df=df_o.copy(deep=True)
+    while df.iloc[:,0].count()==0:
+        cols = [x for x in range(df.shape[1])]
+        cols.remove(0)
+        df.iloc[:,cols]
+    i=0
+    elist=[]
+    while i<len(df.columns):
+        if df.iloc[:,i].count()==0:
+            elist.append(i)
+        i+=1
+    elist=distancing(elist)
+    elist.append(len(df.columns))
+    mark=0
+    d_list=[]
+    for i in elist:
+        d=df.iloc[:,mark:i]
+        d_list.append(standard_file_processing(d))
+        mark=i
+    return d_list
+
+
+
+def standard_file_processing(df_o):
+    df=df_o.copy(deep=True)
+    instrument='UNDEFINED'
+    specific='UNDEFINED'
+    df=df.dropna(axis=0,how='all')
+    df=df.dropna(axis=1,how='all')
+    df.reset_index(drop=True,inplace=True)
+    if 'COA' in df.iloc[0,0]:
+        instrument='BRENT'
+    elif 'CLA' in df.iloc[0,0]:
+        instrument='WTI'
+    if 'CALL' in df.iloc[0,1]:
+        specific='CALL'
+    elif 'PUT' in df.iloc[0,1]:
+        specific='PUT'
+    df.drop([0],inplace=True)
+    df['Instrument']=instrument
+    df['Specific']=specific
+    return df
+
+
+def margin_flash(col,logic=0):
+    rlist=pd.Series()
+    if logic==0:
+        rlist=pd.Series(col).apply(lambda x: 'Bullish' if x>0 else ('Neutral' if x==0 else 'Bearish'))
+    else:
+        rlist=pd.Series(col).apply(lambda x: 'Bullish' if x<0 else ('Neutral' if x==0 else 'Bearish'))
+    return rlist    
+
+def collection_trim(df,collection_file,merge_cols):
+    history_flag=0
+    try:
+        collection=pd.read_csv(io.BytesIO(collection_file),encoding='utf8')
+        history_flag=1
+    except:
+        pass
+    if history_flag==0:
+        return df
+    else:
+        df=collection[merge_cols].merge(df,how = 'outer',on=merge_cols,indicator=True).loc[lambda x : x['_merge']=='right_only']
+        df=df.drop('_merge',1)
+        return df
+
+
+def main(event,conte):
+    # try:
+    #     model_score(fetchexcel(input_files['modelscore']),output_files['modelscore'])
+    #     # start_glue('crudescore')
+    #     print('Model Score Processed')
+    # except:
+    #     print('Error Processing Model Score data')
+
+    # try:
+    #     rigdata(fetchexcel(input_files['dashboard']),output_files['rig_count'],collection_files['rig_count'])
+    #     # start_glue('Rig_Count')
+    #     print('Rig Data Processed')
+    # except Exception as e:
+    #     print(e)
+    #     print('Error Processing Rig Count data')
+
+    # try:
+    #     stockdata(fetchexcel(input_files['dashboard']),output_files['stocks'],collection_files['stocks'])
+    #     # start_glue('CrudeOilStock')
+    #     print('Stocks Data Processed')
+    # except:
+    #     print('Error Processing Stocks data')
+
+    # try:
+    #     cftcdata(fetchexcel(input_files['dashboard']),output_files['cftc'],collection_files['cftc'])
+    #     # start_glue('crude_cftc')
+    #     print('CFTC Data Processed')
+    # except:
+    #     print('Error Processing CFTC data')
+
+    # try:    
+    #     curr_corr_data(fetchexcel(input_files['dashboard']),output_files['currency_correlation'],collection_files['currency_correlation'])
+    #     # start_glue('Currency_corelation')
+    #     print('Currency Correlation Data Processed')
+    # except:
+    #     print('Error Processing Currency Correlation data')
+
+    # try:
+    other_assets_data(fetchexcel(input_files['dashboard']),output_files['other_assets'],collection_files['other_assets'])
+    #     # start_glue('crude_other_market_indicators')
+    #     print('Other Assets Data Processed')
+    # except:
+    #     print('Error Processing Other Assets data')
+
+    # try:
+    #     refinery_outage_data(fetchexcel(input_files['dashboard']),output_files['refinery_outage'],collection_files['refinery_outage'])
+    #     # start_glue('Crude_refinery_outage')
+    #     print('Refinery Outage Data Processed')
+    # except:
+    #     print('Error Processing Refinery Outage data')
+
+    # try:
+    #     refinery_margin_data(fetchexcel(input_files['dashboard']),output_files['refinery_margins'],collection_files['refinery_margins'])
+    #     # start_glue('refinerymargin')
+    #     print('Refinery Margin Data Processed')
+    # except:
+    #     print('Error Processing Refinery Margin data')
+
+    # try:
+    #     geopolitical_volatility_data(fetchexcel(input_files['dashboard']),output_files['geopolitical_volatility'],collection_files['geopolitical_volatility'])
+    #     # start_glue('crude_geopolitical_volatility')
+    #     print('Geopolitical Volatility Data Processed')
+    # except:
+    #     print('Error Processing Geopolitical Volatility data')
+
+    # try:
+    #     opec_prod_data(fetchexcel(input_files['dashboard']),output_files['opec'],collection_files['opec'])
+    #     # start_glue('crude_opec')
+    #     print('Opec Production Data Processed')
+    # except:
+    #     print('Error Processing Opec Production data')
+
+    # try:
+    #     key_events(fetchexcel(input_files['key_events']),output_files['key_events'])
+    #     # start_glue('crude_key_events')
+    #     print('Key Events Data Processed')
+    # except:
+    #     print('Error Processing Key Events data')
+    
+    # try:
+    #     key_agency_data(output_files['key_agency_forecast'])
+    #     # start_glue('crude_key_agency_forecast')
+    #     print('Key Avency Data Processed')
+    # except:
+    #     print('Error Processing Key Avency data')
+
+    # try:
+    #     technicals(fetchexcel(input_files['dashboard']),output_files['technicals'])
+    #     # start_glue('crude_technicals')
+    #     print('Technicals Data Processed')
+    # except:
+    #     print('Error Processing Technicals data')
+
+    # try:
+    #     volatility_skew(fetchexcel(input_files['dashboard']),fetchexcel(find_previous(input_files['dashboard'])),output_files['crude_volatility'])
+    #     # start_glue('crude_volatility')
+    #     print('Volatility Skew Data Processed')
+    # except:
+    #     print('Error Processing Volatility Skew data')
+
+if __name__=='__main__':
+    main()
